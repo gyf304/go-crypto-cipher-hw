@@ -1,6 +1,7 @@
 package hwcipher
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -122,13 +123,13 @@ func (a *AfAlg) BlockSize() int {
 	return a.blockSize
 }
 
-func (a *AfAlg) CryptBlocks(dst, src []byte) {
+func (a *AfAlg) SafeCryptBlocks(dst, src []byte) error {
 	if len(src)%a.blockSize != 0 {
-		panic("crypto/cipher: input not full blocks")
+		return errors.New("hwcipher: input not full blocks")
 	}
 
 	if len(dst) < len(src) {
-		panic("crypto/cipher: mismatched buffer lengths")
+		return errors.New("hwcipher: mismatched buffer lengths")
 	}
 
 	a.mutex.Lock()
@@ -136,15 +137,22 @@ func (a *AfAlg) CryptBlocks(dst, src []byte) {
 
 	err := unix.Sendmsg(a.fd, src, nil, nil, unix.MSG_MORE)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	n, err := unix.Read(a.fd, dst[:len(src)])
 	if err != nil {
-		fmt.Println("read error", err)
-		panic(err)
+		return err
 	}
 	if n != len(dst) {
-		panic("read error")
+		return errors.New("read error")
+	}
+	return nil
+}
+
+func (a *AfAlg) CryptBlocks(dst, src []byte) {
+	err := a.SafeCryptBlocks(dst, src)
+	if err != nil {
+		panic(err)
 	}
 }
