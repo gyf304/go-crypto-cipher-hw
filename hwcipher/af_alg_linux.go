@@ -91,8 +91,10 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 		syscall.Close(a.fd)
 	})
 
+	afAlgIVSize := (int)(unsafe.Sizeof(afAlgIV{}))
+
 	// set op, iv
-	cbuf := make([]byte, syscall.CmsgSpace(4)+syscall.CmsgSpace(20))
+	cbuf := make([]byte, syscall.CmsgSpace(4)+syscall.CmsgSpace(afAlgIVSize))
 	opCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[0]))
 	opCmsgHdr.Level = unix.SOL_ALG
 	opCmsgHdr.Type = unix.ALG_SET_OP
@@ -106,7 +108,7 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 	ivCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[syscall.CmsgSpace(4)]))
 	ivCmsgHdr.Level = unix.SOL_ALG
 	ivCmsgHdr.Type = unix.ALG_SET_IV
-	ivCmsgHdr.SetLen(syscall.CmsgLen(20))
+	ivCmsgHdr.SetLen(syscall.CmsgLen(afAlgIVSize))
 	iv := (*afAlgIV)(cmsgData(ivCmsgHdr))
 	iv.ivlen = uint32(len(c.IV))
 	copy(iv.iv[:], c.IV)
@@ -117,6 +119,27 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 	}
 
 	return a, nil
+}
+
+func (a *AfAlg) SetIV(iv []byte) {
+	if len(iv) > MAX_IV_LENGTH {
+		panic(fmt.Errorf("hwcipher: IV length %d is too long", len(iv)))
+	}
+
+	afAlgIVSize := (int)(unsafe.Sizeof(afAlgIV{}))
+	cbuf := make([]byte, syscall.CmsgSpace(afAlgIVSize))
+	ivCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[0]))
+	ivCmsgHdr.Level = unix.SOL_ALG
+	ivCmsgHdr.Type = unix.ALG_SET_IV
+	ivCmsgHdr.SetLen(syscall.CmsgLen(afAlgIVSize))
+	ivPtr := (*afAlgIV)(cmsgData(ivCmsgHdr))
+	ivPtr.ivlen = uint32(len(iv))
+	copy(ivPtr.iv[:], iv)
+
+	err := syscall.Sendmsg(a.fd, nil, cbuf, nil, unix.MSG_MORE)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (a *AfAlg) BlockSize() int {
