@@ -25,6 +25,7 @@ type AfAlgConfig struct {
 type AfAlg struct {
 	fd        int
 	blockSize int
+	decrypt   bool
 	mutex     sync.Mutex
 }
 
@@ -35,6 +36,32 @@ type afAlgIV struct {
 
 func cmsgData(cmsg *syscall.Cmsghdr) unsafe.Pointer {
 	return unsafe.Pointer(uintptr(unsafe.Pointer(cmsg)) + uintptr(syscall.SizeofCmsghdr))
+}
+
+func initFd(fd int, decrypt bool, iv []byte) error {
+	afAlgIVSize := (int)(unsafe.Sizeof(afAlgIV{}))
+
+	// set op, iv
+	cbuf := make([]byte, syscall.CmsgSpace(4)+syscall.CmsgSpace(afAlgIVSize))
+	opCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[0]))
+	opCmsgHdr.Level = unix.SOL_ALG
+	opCmsgHdr.Type = unix.ALG_SET_OP
+	opCmsgHdr.SetLen(syscall.CmsgLen(4))
+	opPtr := (*uint32)(cmsgData(opCmsgHdr))
+	if decrypt {
+		*opPtr = unix.ALG_OP_DECRYPT
+	} else {
+		*opPtr = unix.ALG_OP_ENCRYPT
+	}
+	ivCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[syscall.CmsgSpace(4)]))
+	ivCmsgHdr.Level = unix.SOL_ALG
+	ivCmsgHdr.Type = unix.ALG_SET_IV
+	ivCmsgHdr.SetLen(syscall.CmsgLen(afAlgIVSize))
+	ivMsg := (*afAlgIV)(cmsgData(ivCmsgHdr))
+	ivMsg.ivlen = uint32(len(iv))
+	copy(ivMsg.iv[:], iv)
+
+	return syscall.Sendmsg(int(fd), nil, cbuf, nil, unix.MSG_MORE)
 }
 
 func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
@@ -83,6 +110,7 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 	}
 
 	a := &AfAlg{
+		decrypt:   c.Decrypt,
 		fd:        int(fd),
 		blockSize: c.BlockSize,
 	}
@@ -91,29 +119,7 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 		syscall.Close(a.fd)
 	})
 
-	afAlgIVSize := (int)(unsafe.Sizeof(afAlgIV{}))
-
-	// set op, iv
-	cbuf := make([]byte, syscall.CmsgSpace(4)+syscall.CmsgSpace(afAlgIVSize))
-	opCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[0]))
-	opCmsgHdr.Level = unix.SOL_ALG
-	opCmsgHdr.Type = unix.ALG_SET_OP
-	opCmsgHdr.SetLen(syscall.CmsgLen(4))
-	opPtr := (*uint32)(cmsgData(opCmsgHdr))
-	if c.Decrypt {
-		*opPtr = unix.ALG_OP_DECRYPT
-	} else {
-		*opPtr = unix.ALG_OP_ENCRYPT
-	}
-	ivCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[syscall.CmsgSpace(4)]))
-	ivCmsgHdr.Level = unix.SOL_ALG
-	ivCmsgHdr.Type = unix.ALG_SET_IV
-	ivCmsgHdr.SetLen(syscall.CmsgLen(afAlgIVSize))
-	iv := (*afAlgIV)(cmsgData(ivCmsgHdr))
-	iv.ivlen = uint32(len(c.IV))
-	copy(iv.iv[:], c.IV)
-
-	err = syscall.Sendmsg(int(fd), nil, cbuf, nil, unix.MSG_MORE)
+	err = initFd(a.fd, c.Decrypt, c.IV)
 	if err != nil {
 		return nil, err
 	}
@@ -122,21 +128,11 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 }
 
 func (a *AfAlg) SetIV(iv []byte) {
-	if len(iv) > MAX_IV_LENGTH {
-		panic(fmt.Errorf("hwcipher: IV length %d is too long", len(iv)))
+	if len(iv) != a.blockSize {
+		panic(fmt.Errorf("hwcipher: wrong IV length %d", len(iv)))
 	}
 
-	afAlgIVSize := (int)(unsafe.Sizeof(afAlgIV{}))
-	cbuf := make([]byte, syscall.CmsgSpace(afAlgIVSize))
-	ivCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[0]))
-	ivCmsgHdr.Level = unix.SOL_ALG
-	ivCmsgHdr.Type = unix.ALG_SET_IV
-	ivCmsgHdr.SetLen(syscall.CmsgLen(afAlgIVSize))
-	ivPtr := (*afAlgIV)(cmsgData(ivCmsgHdr))
-	ivPtr.ivlen = uint32(len(iv))
-	copy(ivPtr.iv[:], iv)
-
-	err := syscall.Sendmsg(a.fd, nil, cbuf, nil, unix.MSG_MORE)
+	err := initFd(a.fd, a.decrypt, iv)
 	if err != nil {
 		panic(err)
 	}
