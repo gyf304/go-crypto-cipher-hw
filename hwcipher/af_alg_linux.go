@@ -132,6 +132,9 @@ func (a *AfAlg) SetIV(iv []byte) {
 		panic(fmt.Errorf("hwcipher: wrong IV length %d", len(iv)))
 	}
 
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
 	err := initFd(a.fd, a.decrypt, iv)
 	if err != nil {
 		panic(err)
@@ -163,7 +166,7 @@ func (a *AfAlg) SafeCryptBlocks(dst, src []byte) error {
 	if err != nil {
 		return err
 	}
-	if n != len(dst) {
+	if n != len(src) {
 		return errors.New("read error")
 	}
 	return nil
