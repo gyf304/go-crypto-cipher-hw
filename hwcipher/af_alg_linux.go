@@ -6,12 +6,9 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
-
-const MAX_IV_LENGTH = 32
 
 type AfAlgConfig struct {
 	AlgType   string
@@ -25,50 +22,12 @@ type AfAlgConfig struct {
 type AfAlg struct {
 	fd        int
 	blockSize int
-	decrypt   bool
+	op        int
+	cbuf      afAlgCmsg
 	mutex     sync.Mutex
 }
 
-type afAlgIV struct {
-	ivlen uint32
-	iv    [MAX_IV_LENGTH]byte
-}
-
-func cmsgData(cmsg *syscall.Cmsghdr) unsafe.Pointer {
-	return unsafe.Pointer(uintptr(unsafe.Pointer(cmsg)) + uintptr(syscall.SizeofCmsghdr))
-}
-
-func initFd(fd int, decrypt bool, iv []byte) error {
-	afAlgIVSize := (int)(unsafe.Sizeof(afAlgIV{}))
-
-	// set op, iv
-	cbuf := make([]byte, syscall.CmsgSpace(4)+syscall.CmsgSpace(afAlgIVSize))
-	opCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[0]))
-	opCmsgHdr.Level = unix.SOL_ALG
-	opCmsgHdr.Type = unix.ALG_SET_OP
-	opCmsgHdr.SetLen(syscall.CmsgLen(4))
-	opPtr := (*uint32)(cmsgData(opCmsgHdr))
-	if decrypt {
-		*opPtr = unix.ALG_OP_DECRYPT
-	} else {
-		*opPtr = unix.ALG_OP_ENCRYPT
-	}
-	ivCmsgHdr := (*syscall.Cmsghdr)(unsafe.Pointer(&cbuf[syscall.CmsgSpace(4)]))
-	ivCmsgHdr.Level = unix.SOL_ALG
-	ivCmsgHdr.Type = unix.ALG_SET_IV
-	ivCmsgHdr.SetLen(syscall.CmsgLen(afAlgIVSize))
-	ivMsg := (*afAlgIV)(cmsgData(ivCmsgHdr))
-	ivMsg.ivlen = uint32(len(iv))
-	copy(ivMsg.iv[:], iv)
-
-	return syscall.Sendmsg(int(fd), nil, cbuf, nil, unix.MSG_MORE)
-}
-
 func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
-	if len(c.IV) > MAX_IV_LENGTH {
-		return nil, fmt.Errorf("IV length %d is too long", len(c.IV))
-	}
-
 	if c.BlockSize == 0 {
 		if len(c.IV) == 0 {
 			c.BlockSize = len(c.Key)
@@ -109,8 +68,14 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 		return nil, err
 	}
 
+	op := unix.ALG_OP_ENCRYPT
+	if c.Decrypt {
+		op = unix.ALG_OP_DECRYPT
+	}
+
 	a := &AfAlg{
-		decrypt:   c.Decrypt,
+		op:        op,
+		cbuf:      afAlgCmsg{}.setOp(op).setIv(c.IV),
 		fd:        int(fd),
 		blockSize: c.BlockSize,
 	}
@@ -118,11 +83,6 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 	runtime.SetFinalizer(a, func(a *AfAlg) {
 		syscall.Close(a.fd)
 	})
-
-	err = initFd(a.fd, c.Decrypt, c.IV)
-	if err != nil {
-		return nil, err
-	}
 
 	return a, nil
 }
@@ -135,10 +95,7 @@ func (a *AfAlg) SetIV(iv []byte) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	err := initFd(a.fd, a.decrypt, iv)
-	if err != nil {
-		panic(err)
-	}
+	a.cbuf = afAlgCmsg{}.setOp(a.op).setIv(iv)
 }
 
 func (a *AfAlg) BlockSize() int {
@@ -157,12 +114,14 @@ func (a *AfAlg) SafeCryptBlocks(dst, src []byte) error {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	err := unix.Sendmsg(a.fd, src, nil, nil, unix.MSG_MORE)
+	// var cbuf afAlgCmsg
+	err := syscall.Sendmsg(a.fd, src, a.cbuf, nil, unix.MSG_MORE)
 	if err != nil {
 		return err
 	}
+	a.cbuf = nil
 
-	n, err := unix.Read(a.fd, dst[:len(src)])
+	n, _, _, _, err := syscall.Recvmsg(a.fd, dst, nil, 0)
 	if err != nil {
 		return err
 	}
