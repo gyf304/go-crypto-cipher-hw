@@ -9,6 +9,7 @@ type MutableBlockMode interface {
 	cipher.BlockMode
 	SetIV([]byte)
 	SetKey([]byte)
+	SetDecrypt(bool)
 }
 
 type Pool struct {
@@ -17,9 +18,10 @@ type Pool struct {
 }
 
 type pooledBlockMode struct {
-	pool *Pool
-	iv   []byte
-	key  []byte
+	pool    *Pool
+	iv      []byte
+	key     []byte
+	decrypt bool
 }
 
 func (p *pooledBlockMode) SetIV(iv []byte) {
@@ -36,12 +38,22 @@ func (p *pooledBlockMode) SetKey(key []byte) {
 	copy(p.key, key)
 }
 
+func (p *pooledBlockMode) SetDecrypt(decrypt bool) {
+	p.decrypt = decrypt
+}
+
 func (p *pooledBlockMode) CryptBlocks(dst, src []byte) {
 	b := <-p.pool.pool
+	b.SetDecrypt(p.decrypt)
 	b.SetIV(p.iv)
 	b.CryptBlocks(dst, src)
 	srcLen := len(src)
-	newIV := dst[srcLen-p.pool.blockSize : srcLen]
+	var newIV []byte
+	if p.decrypt {
+		newIV = src[srcLen-p.pool.blockSize : srcLen]
+	} else {
+		newIV = dst[srcLen-p.pool.blockSize : srcLen]
+	}
 	p.SetIV(newIV)
 	p.pool.pool <- b
 }
@@ -71,12 +83,13 @@ func NewPool(blockSize int, modes ...cipher.BlockMode) (*Pool, error) {
 	return pool, nil
 }
 
-func (p *Pool) Get(key []byte, iv []byte) cipher.BlockMode {
+func (p *Pool) Get(key []byte, iv []byte, isRead bool) cipher.BlockMode {
 	m := &pooledBlockMode{
 		pool: p,
 		iv:   make([]byte, p.blockSize),
 		key:  make([]byte, len(key)),
 	}
+	m.SetDecrypt(isRead)
 	m.SetIV(iv)
 	m.SetKey(key)
 	return m

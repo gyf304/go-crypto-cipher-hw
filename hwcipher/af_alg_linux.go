@@ -40,6 +40,7 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer syscall.Close(sfd)
 
 	addr := &unix.SockaddrALG{
 		Type: c.AlgType,
@@ -59,13 +60,7 @@ func NewAfAlg(c *AfAlgConfig) (*AfAlg, error) {
 
 	fd, _, errno := unix.Syscall(unix.SYS_ACCEPT, uintptr(sfd), 0, 0)
 	if errno != 0 {
-		syscall.Close(sfd)
 		return nil, syscall.Errno(errno)
-	}
-
-	err = syscall.Close(sfd)
-	if err != nil {
-		return nil, err
 	}
 
 	op := unix.ALG_OP_ENCRYPT
@@ -98,6 +93,29 @@ func (a *AfAlg) SetIV(iv []byte) {
 	a.cbuf = afAlgCmsg{}.setOp(a.op).setIv(iv)
 }
 
+func (a *AfAlg) SetKey(key []byte) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	err := unix.SetsockoptString(a.fd, unix.SOL_ALG, unix.ALG_SET_KEY, string(key))
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (a *AfAlg) SetDecrypt(decrypt bool) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	op := unix.ALG_OP_ENCRYPT
+	if decrypt {
+		op = unix.ALG_OP_DECRYPT
+	}
+
+	a.op = op
+	a.cbuf = afAlgCmsg{}.setOp(op)
+}
+
 func (a *AfAlg) BlockSize() int {
 	return a.blockSize
 }
@@ -114,7 +132,6 @@ func (a *AfAlg) SafeCryptBlocks(dst, src []byte) error {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
-	// var cbuf afAlgCmsg
 	err := syscall.Sendmsg(a.fd, src, a.cbuf, nil, unix.MSG_MORE)
 	if err != nil {
 		return err
